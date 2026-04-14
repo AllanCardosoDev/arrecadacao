@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+venv/
+env/
+Pipfile.lock
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# Data
+data/
+*.csv
+*.xlsx
+
+# Streamlit
+.streamlit/
+
+# Ignore environment folders
+.env
+.env.*
+
+# Notebook checkpoints
+.ipynb_checkpoints/
