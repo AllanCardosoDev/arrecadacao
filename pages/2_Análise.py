@@ -5,6 +5,7 @@ import plotly.express as px
 from datetime import datetime
 import os
 import unicodedata
+import re
 
 # --- Configurações da Página ---
 st.set_page_config(
@@ -33,15 +34,21 @@ MESES_ORDEM = {
 def load_data(file_path):
     try:
         df = pd.read_excel(file_path)
-        df.columns = [unicodedata.normalize('NFKD', col).encode('ascii', 'ignore').decode('utf-8').lower() for col in df.columns]
+        # Normalizar nomes das colunas: remover acentos, espaços, converter para minúsculas
+        df.columns = [unicodedata.normalize('NFKD', col).encode('ascii', 'ignore').decode('utf-8').lower().replace(' ', '_') for col in df.columns]
+
+        # Renomear colunas para padronização
         df = df.rename(columns={'mes': 'mes_str', 'valor': 'arrecadacao'})
 
         # Validar colunas essenciais
         if 'mes_str' not in df.columns:
-            st.error("Coluna 'mes' não encontrada no arquivo de dados.")
+            st.error("Coluna 'mes' não encontrada no arquivo de dados. Verifique se a coluna de mês existe e está nomeada corretamente.")
             return pd.DataFrame()
         if 'ano' not in df.columns:
-            st.error("Coluna 'ano' não encontrada no arquivo de dados.")
+            st.error("Coluna 'ano' não encontrada no arquivo de dados. Verifique se a coluna de ano existe e está nomeada corretamente.")
+            return pd.DataFrame()
+        if 'arrecadacao' not in df.columns:
+            st.error("Coluna 'valor' (arrecadacao) não encontrada no arquivo de dados. Verifique se a coluna de valor existe e está nomeada corretamente.")
             return pd.DataFrame()
 
         # Normalizar valores da coluna de mês (remover acentos e padronizar)
@@ -49,7 +56,6 @@ def load_data(file_path):
         df['mes_norm'] = df['mes_str'].apply(lambda x: unicodedata.normalize('NFKD', str(x)).encode('ASCII', 'ignore').decode('ASCII').upper())
 
         # Extrair código textual do mês (ex.: 'AGO' de 'AGO-2016')
-        import re
         def _extract_month_code(s: str) -> str:
             m = re.search(r'([A-Z]+)', s)
             return m.group(1) if m else s
@@ -63,67 +69,94 @@ def load_data(file_path):
         mask_missing = df['mes_num'].isna()
         if mask_missing.any():
             def _parse_from_norm(s: str):
-                parts = re.split(r'[-/\\\\]', s)
-                if len(parts) >= 2:
-                    left = parts[0].strip()
-                    right = parts[1].strip()
-                    if left.isdigit():
-                        return int(left), right
-                    else:
-                        code = _extract_month_code(left)
-                        return (MESES_ORDEM.get(code), right)
-                return (None, None)
+                # Tenta parsear formatos como 'MM-AAAA', 'MMM-AAAA', 'AAAA-MM', 'AAAA-MMM'
+                parts = re.split(r'[-/\\\$|', s)
+                if len(parts) == 2:
+                    p1 = parts[0].strip()
+                    p2 = parts[1].strip()
 
-            parsed = df.loc[mask_missing, 'mes_norm'].apply(_parse_from_norm)
-            df.loc[mask_missing, 'mes_num'] = parsed.apply(lambda t: t[0])
-            # tentar preencher ano se estiver embutido em mes_norm
-            try:
-                df.loc[mask_missing, 'ano'] = df.loc[mask_missing].apply(lambda r: r['ano'] if pd.notna(r['ano']) else (parsed.loc[r.name][1] if parsed.loc[r.name] and parsed.loc[r.name][1] is not None else r['ano']), axis=1)
-            except Exception:
-                pass
+                    # Caso MM-AAAA ou MMM-AAAA
+                    if p1.isdigit() and len(p1) <= 2: # MM-AAAA
+                        return int(p1), p2
+                    elif not p1.isdigit() and len(p1) <= 3: # MMM-AAAA
+                        code = _extract_month_code(p1)
+                        return MESES_ORDEM.get(code), p2
+                    # Caso AAAA-MM ou AAAA-MMM
+                    elif p2.isdigit() and len(p2) <= 2: # AAAA-MM
+                        return int(p2), p1
+                    elif not p2.isdigit() and len(p2) <= 3: # AAAA-MMM
+                        code = _extract_month_code(p2)
+                        return MESES_ORDEM.get(code), p1
+                return None, None
+
+            parsed_results = df.loc[mask_missing, 'mes_norm'].apply(_parse_from_norm)
+
+            # Atualiza mes_num
+            df.loc[mask_missing, 'mes_num'] = parsed_results.apply(lambda t: t[0])
+
+            # Tenta preencher ano se estiver embutido em mes_norm e a coluna 'ano' estiver vazia
+            for idx, (month_val, year_val) in parsed_results.items():
+                if pd.isna(df.loc[idx, 'ano']) and year_val is not None:
+                    try:
+                        df.loc[idx, 'ano'] = int(year_val)
+                    except ValueError:
+                        pass # Não conseguiu converter para int, mantém como está
 
         # Converter ano e arrecadacao para tipos numéricos
         df['ano'] = pd.to_numeric(df['ano'], errors='coerce').astype('Int64')
         df['arrecadacao'] = pd.to_numeric(df['arrecadacao'], errors='coerce').fillna(0.0)
 
+        # Remover linhas onde 'ano' ou 'mes_num' são nulos após todas as tentativas de parsing
+        df.dropna(subset=['ano', 'mes_num'], inplace=True)
+
         # Criar coluna de data a partir de ano e mes_num (primeiro dia do mês)
         df['mes_num'] = pd.to_numeric(df['mes_num'], errors='coerce').astype('Int64')
         df['data'] = pd.to_datetime(df['ano'].astype(str) + '-' + df['mes_num'].astype(str).str.zfill(2) + '-01', errors='coerce')
+
+        # Remover linhas com datas inválidas
+        df.dropna(subset=['data'], inplace=True)
 
         # Ordenar
         df = df.sort_values(by=['ano', 'mes_num']).reset_index(drop=True)
         return df
     except FileNotFoundError:
-        st.error(f"Erro: O arquivo '{file_path}' não foi encontrado. Certifique-se de que ele está na pasta 'data'.")
+        st.error(f"Erro: O arquivo '{file_path}' não foi encontrado. Certifique-se de que ele está na pasta 'data' e que o nome do arquivo está correto.")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Erro ao carregar ou processar os dados: {e}")
+        st.error(f"Erro ao carregar ou processar os dados: {e}. Verifique o formato do arquivo e as colunas 'mes', 'ano' e 'valor'.")
         return pd.DataFrame()
 
 # Função para localizar arquivo de dados (suporta acentos e variações no nome)
 def find_data_file(data_dir: str = 'data') -> str | None:
     if not os.path.isdir(data_dir):
+        st.warning(f"A pasta '{data_dir}' não foi encontrada. Certifique-se de que a pasta 'data' existe no mesmo diretório do script.")
         return None
+
+    # Lista de nomes de arquivo potenciais (normalizados)
+    potential_names_norm = [
+        'ARRECADAO.XLSX', 'ARRECADACAO.XLSX', 'ARRECADAO.XLS', 'ARRECADACAO.XLS',
+        'ARRECADAO.XLSM', 'ARRECADACAO.XLSM', 'ARRECADAO.XLSB', 'ARRECADACAO.XLSB'
+    ]
+
     for f in os.listdir(data_dir):
-        if f.lower().endswith(('.xls', '.xlsx', '.xlsm', '.xlsb')):
-            name_norm = unicodedata.normalize('NFKD', f).encode('ASCII', 'ignore').decode('ASCII').upper()
-            if 'ARRECADA' in name_norm:
-                return os.path.join(data_dir, f)
-    candidates = ['ARRECADAO.xlsx', 'ARRECADAÇÃO.xlsx', 'ARRECADACAO.xlsx', 'ARRECADAO.xls', 'ARRECADAÇÃO.xls']
-    for c in candidates:
-        p = os.path.join(data_dir, c)
-        if os.path.exists(p):
-            return p
+        # Normaliza o nome do arquivo encontrado para comparação
+        f_norm = unicodedata.normalize('NFKD', f).encode('ASCII', 'ignore').decode('ASCII').upper()
+
+        # Verifica se o nome normalizado do arquivo corresponde a algum dos potenciais
+        if f_norm in potential_names_norm:
+            return os.path.join(data_dir, f) # Retorna o caminho com o nome original do arquivo
+
+    st.warning(f"Nenhum arquivo de arrecadação (ex: ARRECADAO.xlsx) foi encontrado na pasta '{data_dir}'.")
     return None
 
 # Caminho do arquivo de dados
-found = find_data_file('data')
-if found is None:
-    DATA_PATH = os.path.join('data', 'ARRECADACAO.xlsx')
-else:
-    DATA_PATH = found
+DATA_DIR = 'data'
+found_file_path = find_data_file(DATA_DIR)
 
-df = load_data(DATA_PATH)
+if found_file_path:
+    df = load_data(found_file_path)
+else:
+    df = pd.DataFrame() # Cria um DataFrame vazio se o arquivo não for encontrado
 
 if not df.empty:
     # --- Título da Página ---
@@ -142,11 +175,14 @@ if not df.empty:
     )
 
     # Filtro de Mês
-    all_months_str = list(MESES_ORDEM.keys())
+    # Garante que a ordem dos meses no filtro seja a correta
+    available_months_in_data = df['mes_str'].unique()
+    sorted_available_months = sorted(available_months_in_data, key=lambda x: MESES_ORDEM.get(unicodedata.normalize('NFKD', x).encode('ASCII', 'ignore').decode('ASCII').upper(), 99))
+
     selected_months_str = st.sidebar.multiselect(
         "Selecione o(s) Mês(es)",
-        options=all_months_str,
-        default=all_months_str # Seleciona todos por padrão
+        options=sorted_available_months,
+        default=sorted_available_months # Seleciona todos por padrão
     )
 
     # Aplicar filtros
@@ -168,7 +204,9 @@ if not df.empty:
         )
 
         # KPI 2: Média Mensal
-        media_mensal = df_filtered['arrecadacao'].mean()
+        # Calcula a média com base no número de meses únicos no filtro
+        num_meses_unicos = df_filtered[['ano', 'mes_num']].drop_duplicates().shape[0]
+        media_mensal = total_arrecadacao / num_meses_unicos if num_meses_unicos > 0 else 0
         col2.metric(
             label="Média Mensal",
             value=f"R$ {media_mensal:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -176,9 +214,10 @@ if not df.empty:
 
         # KPI 3: Arrecadação do Último Mês (se houver)
         if not df_filtered.empty:
-            latest_data = df_filtered.sort_values(by='data', ascending=False).iloc[0]
-            ultimo_mes_arrecadacao = latest_data['arrecadacao']
-            ultimo_mes_label = f"{latest_data['mes_str']}/{latest_data['ano']}"
+            # Garante que o último mês seja o mais recente em termos de data
+            latest_data_row = df_filtered.sort_values(by='data', ascending=False).iloc[0]
+            ultimo_mes_arrecadacao = latest_data_row['arrecadacao']
+            ultimo_mes_label = f"{latest_data_row['mes_str']}/{latest_data_row['ano']}"
             col3.metric(
                 label=f"Arrecadação Último Mês ({ultimo_mes_label})",
                 value=f"R$ {ultimo_mes_arrecadacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -253,4 +292,4 @@ if not df.empty:
         st.dataframe(df_filtered.head(10), use_container_width=True)
 
 else:
-    st.error("Não foi possível carregar os dados para a página de Análise Detalhada. Verifique o arquivo 'ARRECADAO.xlsx'.")
+    st.error("Não foi possível carregar os dados para a página de Análise Detalhada. Verifique a pasta 'data' e o arquivo de arrecadação.")
