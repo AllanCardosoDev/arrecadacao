@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import os
 import unicodedata
+import zipfile
 
 PRIMARY_COLOR = "#C8102E"
 NAVY = "#0B3D91"
@@ -34,7 +35,6 @@ def _normalize_str(s: str) -> str:
 def load_data(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     if ext == '.csv':
-        # Tenta ponto e vírgula primeiro (padrão Excel BR), depois vírgula
         try:
             df = pd.read_csv(file_path, sep=';', encoding='utf-8-sig')
             if df.shape[1] < 2:
@@ -42,9 +42,14 @@ def load_data(file_path):
         except Exception:
             df = pd.read_csv(file_path, sep=',', encoding='utf-8-sig')
     else:
+        if not zipfile.is_zipfile(file_path):
+            st.error(
+                f"O arquivo '{os.path.basename(file_path)}' parece estar corrompido ou não é um Excel válido. "
+                "Use um arquivo .csv preferencialmente."
+            )
+            return pd.DataFrame(columns=['ANO', 'MÊS', 'VALOR', 'MES_NUM', 'DATA'])
         df = pd.read_excel(file_path, engine='openpyxl')
 
-    # Normaliza nome das colunas (remove espaços extras)
     df.columns = df.columns.str.strip()
 
     month_mapping = {
@@ -52,7 +57,6 @@ def load_data(file_path):
         'JUL': 7, 'AGO': 8, 'SET': 9, 'OUT': 10, 'NOV': 11, 'DEZ': 12
     }
 
-    # Suporte a coluna MÊS ou MES
     mes_col = 'MÊS' if 'MÊS' in df.columns else 'MES'
     df['MES_NUM'] = df[mes_col].str.strip().str.upper().map(month_mapping)
     df['MÊS'] = df[mes_col].str.strip().str.upper()
@@ -62,7 +66,6 @@ def load_data(file_path):
     )
     df['ANO'] = df['ANO'].astype(int)
 
-    # Garante que VALOR é numérico (CSV pode vir com vírgula decimal)
     if df['VALOR'].dtype == object:
         df['VALOR'] = (
             df['VALOR'].astype(str)
@@ -75,24 +78,37 @@ def load_data(file_path):
     return df
 
 def find_data_file(data_dir: str = 'data') -> str | None:
-    # Prioriza CSV
-    candidates = [
-        'ARRECADACAO.csv', 'ARRECADAÇÃO.csv',
-        'ARRECADAO.csv',
-        'ARRECADACAO.xlsx', 'ARRECADAÇÃO.xlsx', 'ARRECADAO.xlsx',
-        'ARRECADACAO.xls', 'ARRECADAÇÃO.xls',
+    # Prioriza CSV sempre
+    csv_candidates = [
+        'ARRECADACAO.csv', 'ARRECADAÇÃO.csv', 'ARRECADAO.csv',
     ]
-    for c in candidates:
+    for c in csv_candidates:
         p = os.path.join(data_dir, c)
         if os.path.exists(p):
             return p
+
+    xlsx_candidates = [
+        'ARRECADACAO.xlsx', 'ARRECADAÇÃO.xlsx', 'ARRECADAO.xlsx',
+        'ARRECADACAO.xls', 'ARRECADAÇÃO.xls',
+    ]
+    for c in xlsx_candidates:
+        p = os.path.join(data_dir, c)
+        if os.path.exists(p):
+            return p
+
     if os.path.isdir(data_dir):
+        # Primeiro busca CSVs
         for f in os.listdir(data_dir):
             if f.startswith('~$'):
                 continue
-            if f.lower().endswith(('.csv', '.xls', '.xlsx', '.xlsm', '.xlsb')):
-                if 'ARRECADA' in _normalize_str(f):
-                    return os.path.join(data_dir, f)
+            if f.lower().endswith('.csv') and 'ARRECADA' in _normalize_str(f):
+                return os.path.join(data_dir, f)
+        # Depois Excel
+        for f in os.listdir(data_dir):
+            if f.startswith('~$'):
+                continue
+            if f.lower().endswith(('.xls', '.xlsx', '.xlsm', '.xlsb')) and 'ARRECADA' in _normalize_str(f):
+                return os.path.join(data_dir, f)
     return None
 
 file_path = find_data_file('data')
